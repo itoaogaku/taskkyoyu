@@ -3,7 +3,7 @@
 window.APP_CONFIG = {
   // 例: 'https://script.google.com/macros/s/AKfy...../exec'
   // ↓ 新しい GAS ウェブアプリをデプロイして得た /exec URL に置き換えてください（別インスタンスの必須手順）。
-  API_URL: 'https://script.google.com/macros/s/XXXXX_REPLACE_WITH_YOUR_NEW_GAS_EXEC_URL_XXXXX/exec',
+  API_URL: 'https://script.google.com/macros/s/AKfycbxeNcfAnHbfsEioaDjnxK-Z9GDhttMPYtlCPBzzXWwNTlSJOo9lBfYSB_AhWRfsihq9/exec',
 
   // GAS の Code.gs の SHARED_TOKEN と同じ値にしてください（この値で両者を合わせ済み）。
   TOKEN: 'DXSKg8eg1kiMs6ysGC5hee2sCm8a',

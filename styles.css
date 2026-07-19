@@ -120,6 +120,9 @@ html, body {
   border-bottom: 0.5px solid var(--sep);
 }
 
+/* 接続設定（初回ゲート）中はタブ操作をさせない */
+.app.setup-mode .app-header { display: none; }
+
 /* iOS セグメンテッドコントロール */
 .tabs {
   display: flex;

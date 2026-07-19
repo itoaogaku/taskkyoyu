@@ -60,12 +60,12 @@ Google スプレッドシートをデータベースにした、スマホファ�
 
 ## 3. フロントエンドの設定
 
-`config.js` を編集します。
+> ⚠️ この節は初期版の説明で古くなっています。**GASのURL・トークンは `config.js` には書きません**（複数人がこの1つのアプリを個別のタスク管理アプリとして使えるようにするため）。代わりに、アプリを開くと表示される「接続設定」画面から、利用者ごとに自分の GAS `/exec` URL とトークンを登録します（その端末にのみ保存）。詳細は `HANDOFF.md` の §3-2 を参照してください。
+
+`config.js` には優先度定義・確認先プリセットなど、利用者共通の設定のみを書きます。
 
 ```js
 window.APP_CONFIG = {
-  API_URL: 'https://script.google.com/macros/s/XXXX/exec', // ← 手順2で控えた URL
-  TOKEN: 'change-me-to-a-random-string',                    // ← Code.gs の SHARED_TOKEN と同じ値
   ASSIGNEE_PRESETS: ['@上司', '@先輩', '@チームA', '@顧客', '@自分'], // 任意でカスタマイズ
   PRIORITIES: [
     { key: 'high', label: '急ぎ' },
@@ -115,9 +115,9 @@ vercel --prod # 本番デプロイ
 
 | 症状 | 原因 / 対処 |
 |------|-------------|
-| `unauthorized` | `config.js` の `TOKEN` と `Code.gs` の `SHARED_TOKEN` が不一致 |
+| `unauthorized` | アプリの「接続設定」で登録した `TOKEN` と `Code.gs` の `SHARED_TOKEN` が不一致 |
 | 読み込み失敗 / CORS エラー | GAS を「アクセスできるユーザー: 全員」で**再デプロイ**しているか確認 |
-| 変更が保存されない | `API_URL` が `/exec` で終わっているか確認（`/dev` は不可） |
+| 変更が保存されない | 登録した URL が `/exec` で終わっているか確認（`/dev` は不可） |
 | 完了日時がずれる | `Code.gs` の `TIMEZONE`（既定 `Asia/Tokyo`）を確認 |
 
 ## ファイル構成
@@ -127,7 +127,7 @@ task-manager/
 ├── index.html      # 画面
 ├── styles.css      # モバイルファースト・高密度スタイル
 ├── app.js          # SPA ロジック（楽観的更新・API 通信）
-├── config.js       # API URL / トークン / プリセット設定
+├── config.js       # 優先度・プリセットなど共通設定（URL/トークンはアプリの接続設定画面で登録）
 ├── vercel.json     # Vercel 設定
 └── gas/
     └── Code.gs     # Google Apps Script バックエンド

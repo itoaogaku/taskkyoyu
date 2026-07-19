@@ -19,6 +19,37 @@
   var ASSIGNEE_STORE = 'assignee_options_v1';
   var OUTBOX_STORE = 'task_outbox_v1';   // 未送信タスク（通信失敗時も端末に保持）
   var CACHE_STORE = 'task_cache_v1';     // 前回の一覧データ（起動時に即表示するため）
+  var CONN_STORE = 'conn_settings_v1';   // この端末専用の接続先（GASのURL・トークン）
+
+  // ================= 接続設定（端末ごとに自分のGAS/スプレッドシートへ接続） =================
+  // 同じアプリを複数人で使っても、接続先はこの端末の localStorage にだけ保存され、
+  // 他の利用者やサーバー(Vercel)には送られない・見えない。
+  function loadConn() {
+    try {
+      var s = localStorage.getItem(CONN_STORE);
+      if (s) {
+        var c = JSON.parse(s);
+        if (c && c.apiUrl && c.token) return c;
+      }
+    } catch (e) { /* noop */ }
+    // config.js に直接 API_URL/TOKEN が書かれている場合は後方互換として使う
+    if (CFG.API_URL && CFG.TOKEN) return { apiUrl: CFG.API_URL, token: CFG.TOKEN };
+    return null;
+  }
+  function saveConn(c) {
+    var prev = conn;
+    conn = c;
+    try { localStorage.setItem(CONN_STORE, JSON.stringify(c)); } catch (e) { /* noop */ }
+    // 接続先(スプレッドシート)を切り替えた場合、前の接続先のキャッシュが一瞬表示されないよう消す
+    if (!prev || prev.apiUrl !== c.apiUrl) {
+      try { localStorage.removeItem(CACHE_STORE); } catch (e2) { /* noop */ }
+    }
+  }
+  function clearConn() {
+    conn = null;
+    try { localStorage.removeItem(CONN_STORE); } catch (e) { /* noop */ }
+  }
+  var conn = loadConn();
 
   // 保管の繰り返し設定（none=登録のみ / monthly=毎月 / yearly=毎年）
   var REPEAT_LABELS = { none: '登録', monthly: '毎月', yearly: '毎年' };
@@ -106,19 +137,27 @@
 
   // ================= API =================
   function api(action, payload) {
+    if (!conn) return Promise.reject(new Error('接続設定が未登録です'));
     payload = payload || {};
     payload.action = action;
-    payload.token = CFG.TOKEN;
+    payload.token = conn.token;
 
     if (action === 'list') {
-      var url = CFG.API_URL + '?action=list&token=' + encodeURIComponent(CFG.TOKEN);
+      var url = conn.apiUrl + '?action=list&token=' + encodeURIComponent(conn.token);
       return fetch(url, { method: 'GET' }).then(parseRes);
     }
-    return fetch(CFG.API_URL, {
+    return fetch(conn.apiUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'text/plain;charset=utf-8' },
       body: JSON.stringify(payload)
     }).then(parseRes);
+  }
+
+  // 指定した接続先(apiUrl/token)に対して疎通確認する（保存前のテスト用）。
+  // 既存の conn を書き換えずに、一時的にその設定で `list` を叩く。
+  function testConn(c) {
+    var url = c.apiUrl + '?action=list&token=' + encodeURIComponent(c.token);
+    return fetch(url, { method: 'GET' }).then(parseRes);
   }
 
   function parseRes(res) {
@@ -297,6 +336,8 @@
 
     $list.innerHTML = '';
 
+    document.querySelector('.app').classList.toggle('setup-mode', state.view === 'setup' && !conn);
+    if (state.view === 'setup') { $empty.hidden = true; renderSetup(); return; }
     if (state.view === 'settings') { $empty.hidden = true; renderSettings(); return; }
     if (state.view === 'archive') { $empty.hidden = true; renderArchive(); return; }
     if (state.view === 'memo') { $empty.hidden = true; renderMemo(); return; }
@@ -498,8 +539,132 @@
     return wrap;
   }
 
+  // ================= 接続設定（自分のGAS/スプレッドシートへ接続） =================
+  // 値をマスクして表示（例: 先頭6文字＋… ／ トークンは先頭4文字＋…）
+  function maskUrl(u) { return u ? (u.length > 40 ? u.slice(0, 28) + '…' + u.slice(-8) : u) : ''; }
+  function maskToken(t) { return t ? (t.length > 6 ? t.slice(0, 4) + '…' : t) : ''; }
+
+  function renderSetup() {
+    var card = document.createElement('div');
+    card.className = 'recur-form';
+
+    var hint = document.createElement('div');
+    hint.className = 'field-label';
+    hint.textContent = conn
+      ? '接続先を変更します。新しいGASウェブアプリのURLとトークンを入力してください。'
+      : 'はじめに、自分のGASウェブアプリのURLとトークンを登録してください。この端末にのみ保存され、他の利用者とは共有されません。';
+    card.appendChild(hint);
+
+    var urlInput = document.createElement('input');
+    urlInput.className = 'composer-input';
+    urlInput.placeholder = 'GASのURL（末尾が /exec のもの）';
+    urlInput.value = conn ? conn.apiUrl : '';
+    card.appendChild(urlInput);
+
+    var tokenInput = document.createElement('input');
+    tokenInput.className = 'composer-input';
+    tokenInput.placeholder = 'トークン（Code.gs の SHARED_TOKEN と同じ値）';
+    tokenInput.value = conn ? conn.token : '';
+    card.appendChild(tokenInput);
+
+    var errorMsg = document.createElement('div');
+    errorMsg.className = 'field-label';
+    errorMsg.style.color = '#ff3b30';
+    errorMsg.hidden = true;
+    card.appendChild(errorMsg);
+
+    var btnRow = document.createElement('div');
+    btnRow.className = 'recur-row';
+
+    var connectBtn = document.createElement('button');
+    connectBtn.type = 'button';
+    connectBtn.className = 'seg on';
+    connectBtn.textContent = '接続する';
+    connectBtn.addEventListener('click', function () {
+      var apiUrl = urlInput.value.trim();
+      var token = tokenInput.value.trim();
+      errorMsg.hidden = true;
+      if (!apiUrl || !token) { errorMsg.textContent = 'URLとトークンを両方入力してください。'; errorMsg.hidden = false; return; }
+      if (apiUrl.indexOf('/exec') < 0) { errorMsg.textContent = 'URLは /exec で終わるものを入力してください。'; errorMsg.hidden = false; return; }
+      if (conn && conn.apiUrl !== apiUrl && loadOutbox().length) {
+        errorMsg.textContent = '未送信のデータが残っています。同期完了（「未送信」表示が消える）を待ってから接続先を切り替えてください。';
+        errorMsg.hidden = false;
+        return;
+      }
+      loading(true);
+      testConn({ apiUrl: apiUrl, token: token }).then(function () {
+        saveConn({ apiUrl: apiUrl, token: token });
+        toast('接続しました');
+        state.view = 'open';
+        state.ready = false;
+        document.querySelectorAll('.tab').forEach(function (x) { x.classList.toggle('is-active', x.dataset.view === 'open'); });
+        render();
+        load();
+      }).catch(function (e) {
+        errorMsg.textContent = '接続に失敗しました: ' + e.message + '（URL・トークン・GASの再デプロイ設定をご確認ください）';
+        errorMsg.hidden = false;
+      }).finally(function () { loading(false); });
+    });
+    btnRow.appendChild(connectBtn);
+
+    if (conn) {
+      var cancelBtn = document.createElement('button');
+      cancelBtn.type = 'button';
+      cancelBtn.className = 'seg';
+      cancelBtn.textContent = 'キャンセル';
+      cancelBtn.addEventListener('click', function () {
+        state.view = 'settings';
+        document.querySelectorAll('.tab').forEach(function (x) { x.classList.toggle('is-active', x.dataset.view === 'settings'); });
+        render();
+      });
+      btnRow.appendChild(cancelBtn);
+    }
+
+    card.appendChild(btnRow);
+    $list.appendChild(card);
+  }
+
   // ================= 確認先タブ（確認対象者の管理） =================
   function renderSettings() {
+    var connCard = document.createElement('div');
+    connCard.className = 'recur-form';
+    var connHint = document.createElement('div');
+    connHint.className = 'field-label';
+    connHint.textContent = conn
+      ? ('接続中: ' + maskUrl(conn.apiUrl) + ' / トークン ' + maskToken(conn.token))
+      : '接続先が未登録です。';
+    connCard.appendChild(connHint);
+    var connBtnRow = document.createElement('div');
+    connBtnRow.className = 'recur-row';
+    var changeBtn = document.createElement('button');
+    changeBtn.type = 'button';
+    changeBtn.className = 'seg';
+    changeBtn.textContent = '接続先を変更';
+    changeBtn.addEventListener('click', function () {
+      state.view = 'setup';
+      document.querySelectorAll('.tab').forEach(function (x) { x.classList.remove('is-active'); });
+      render();
+    });
+    connBtnRow.appendChild(changeBtn);
+    if (conn) {
+      var disconnectBtn = document.createElement('button');
+      disconnectBtn.type = 'button';
+      disconnectBtn.className = 'seg';
+      disconnectBtn.textContent = 'この端末の接続を解除';
+      disconnectBtn.addEventListener('click', function () {
+        if (loadOutbox().length) { toast('未送信のデータがあります。同期完了後に解除してください。'); return; }
+        if (!confirm('この端末に保存した接続設定を削除しますか？（スプレッドシート側のデータは消えません）')) return;
+        clearConn();
+        state.view = 'setup';
+        state.tasks = []; state.archive = []; state.memos = [];
+        document.querySelectorAll('.tab').forEach(function (x) { x.classList.remove('is-active'); });
+        render();
+      });
+      connBtnRow.appendChild(disconnectBtn);
+    }
+    connCard.appendChild(connBtnRow);
+    $list.appendChild(connCard);
+
     var card = document.createElement('div');
     card.className = 'recur-form';
 
@@ -1461,13 +1626,17 @@
 
   // ================= 起動 =================
   function init() {
-    if (!CFG.API_URL || CFG.API_URL.indexOf('PASTE_YOUR') === 0) {
-      toast('config.js に GAS の URL を設定してください');
-    }
     buildComposerTags();
     updatePrioBtn();
     bindEvents();
     setAppHeight();             // アプリ高さをビューポートに合わせる
+
+    if (!conn) {
+      // 接続先が未登録の端末では、まず接続設定画面のみを表示する
+      state.view = 'setup';
+      render();
+      return;
+    }
     updateComposerVisibility(); // 読み込み前に入力UIを隠しておく（丸＋/−の同時表示を防ぐ）
     load();
   }

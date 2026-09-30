@@ -954,16 +954,16 @@
   }
 
   function saveArchiveFields(e, fields) {
-    if (e.pending) { toast('通信待ちです。送信後に変更できます'); render(); return; }
     var prev = {};
     Object.keys(fields).forEach(function (k) { prev[k] = e[k]; e[k] = fields[k]; });
     render();
+    if (e.pending) { patchOutbox(e.id, fields); return; } // 追加と一緒に送る
     var payload = { id: e.id };
     Object.keys(fields).forEach(function (k) { payload[k] = fields[k]; });
     loading(true);
     api('updateArchive', payload).then(function (d) {
-      if (d && d.archive) state.archive = d.archive;
-      if (d && d.tasks) state.tasks = d.tasks;
+      // 画面上の記録はそのまま。日付変更等で自動タスク化された分だけ取り込む
+      mergeNewTasks(d && d.tasks);
       render();
     }).catch(function (err) {
       Object.keys(prev).forEach(function (k) { e[k] = prev[k]; });
@@ -988,8 +988,7 @@
   function removeArchive(e) {
     // 未送信の保管はサーバーへ送らず、端末のキューごと削除
     if (e.pending) {
-      state.archive = state.archive.filter(function (x) { return x.id !== e.id; });
-      outboxRemove(e.id);
+      state.archive = removePending(state.archive, e.id);
       render();
       return;
     }
@@ -1121,15 +1120,12 @@
   }
 
   function updateMemo(m, text) {
-    if (m.pending) { toast('通信待ちです。送信後に変更できます'); return; }
     var prev = m.text;
     m.text = text;
     render();
+    if (m.pending) { patchOutbox(m.id, { text: text }); return; } // 追加と一緒に送る
     loading(true);
-    api('updateMemo', { id: m.id, text: text }).then(function (d) {
-      if (d && d.memos) state.memos = d.memos;
-      render();
-    }).catch(function (e) {
+    api('updateMemo', { id: m.id, text: text }).catch(function (e) {
       m.text = prev;
       render();
       toast('保存失敗: ' + e.message);
@@ -1139,8 +1135,7 @@
   function removeMemo(m) {
     // 未送信メモはサーバーへ送らず、端末のキューごと削除
     if (m.pending) {
-      state.memos = state.memos.filter(function (x) { return x.id !== m.id; });
-      outboxRemove(m.id);
+      state.memos = removePending(state.memos, m.id);
       render();
       return;
     }
@@ -1246,12 +1241,37 @@
   function outboxRemove(id) { saveOutbox(loadOutbox().filter(function (x) { return x.id !== id; })); }
   function findIdx(list, id) { for (var i = 0; i < list.length; i++) if (list[i].id === id) return i; return -1; }
 
+  // ---- 未送信アイテムへの変更 ----
+  // 追加の送信完了を待たずに編集・完了・削除できるようにする。
+  // 変更はキューの中身にも書き込み（送信前なら追加と一緒に届く）、
+  // 送信中だった分は送信完了後に差分を送る（reconcileAfterAdd）。
+  var inFlightId = null;          // 送信中の未送信アイテムID
+  var deletedWhileSending = {};   // 送信中に削除されたID（送信完了後にサーバーからも削除）
+  var SYNC_FIELDS = {
+    task: ['title', 'priority', 'assignees', 'lineMemo'],
+    memo: ['text'],
+    archive: ['text', 'priority', 'assignees', 'createdAt', 'repeat']
+  };
+  var UPDATE_ACTION = { task: 'update', memo: 'updateMemo', archive: 'updateArchive' };
+  var DELETE_ACTION = { task: 'delete', memo: 'deleteMemo', archive: 'deleteArchive' };
+  function patchOutbox(id, fields) {
+    var ob = loadOutbox(), i = findIdx(ob, id);
+    if (i < 0) return;
+    Object.keys(fields).forEach(function (k) { ob[i][k] = fields[k]; });
+    saveOutbox(ob);
+  }
+  function removePending(list, id) {
+    outboxRemove(id);
+    if (id === inFlightId) deletedWhileSending[id] = true;
+    return list.filter(function (x) { return x.id !== id; });
+  }
+
   // 未送信アイテム → 各一覧に表示するための楽観オブジェクト（pending 付き）
   function outboxToTask(item) {
     return {
-      id: item.id, title: item.title, priority: item.priority, status: 'open',
-      assignees: item.assignees || '', lineMemo: '',
-      createdAt: item.createdAt, doneAt: '', updatedAt: '', pending: true
+      id: item.id, title: item.title, priority: item.priority, status: item.status || 'open',
+      assignees: item.assignees || '', lineMemo: item.lineMemo || '',
+      createdAt: item.createdAt, doneAt: item.doneAt || '', updatedAt: '', pending: true
     };
   }
   function outboxToMemo(item) {
@@ -1295,45 +1315,73 @@
       action = 'addArchive';
       payload = { id: item.id, text: item.text, priority: item.priority, assignees: item.assignees, createdAt: item.createdAt, repeat: item.repeat };
     } else {
-      action = 'add'; payload = { id: item.id, title: item.title, priority: item.priority, assignees: item.assignees };
+      action = 'add';
+      payload = { id: item.id, title: item.title, priority: item.priority, assignees: item.assignees, lineMemo: item.lineMemo || '' };
     }
+    inFlightId = item.id;
     api(action, payload).then(function (d) {
-      applyFlushSuccess(type, item, d);
+      inFlightId = null;
       outboxRemove(item.id);
+      applyFlushSuccess(type, item, d);
       flushing = false;
       render();
       if (loadOutbox().length) flushOutbox();     // 続けて次を送信
     }).catch(function (e) {
+      inFlightId = null;
       flushing = false;
       scheduleFlush();                            // 送れなかった。後でまた試す
     });
   }
-  // 送信成功時、該当アイテムの pending を解除（サーバーの値で置換）
+  function listOf(type) { return type === 'memo' ? state.memos : type === 'archive' ? state.archive : state.tasks; }
+  // 送信成功時、該当アイテムの pending を解除。画面上のオブジェクトはそのまま使う
+  // （送信中に行われた変更を上書きしないため）。サーバー側で決まる値だけ取り込む。
   function applyFlushSuccess(type, item, d) {
-    if (type === 'memo') {
-      var i = findIdx(state.memos, item.id), real = d && d.memo;
-      if (i >= 0) { if (real) state.memos[i] = real; else state.memos[i].pending = false; }
-      else if (real) state.memos.unshift(real);
-    } else if (type === 'archive') {
-      var j = findIdx(state.archive, item.id), re = d && d.entry;
-      if (j >= 0) { if (re) state.archive[j] = re; else state.archive[j].pending = false; }
-      else if (re) state.archive.unshift(re);
-      // 保管が当日等で自動タスク化された分を取り込む（既存・未送信は消さない）
-      if (d && d.tasks) {
-        var have = {}; state.tasks.forEach(function (t) { have[t.id] = true; });
-        d.tasks.forEach(function (t) { if (!have[t.id]) state.tasks.push(t); });
-      }
-    } else {
-      var k = findIdx(state.tasks, item.id), rt = d && d.task;
-      if (k >= 0) { if (rt) state.tasks[k] = rt; else state.tasks[k].pending = false; }
-      else if (rt) state.tasks.unshift(rt);
+    var real = d && (type === 'memo' ? d.memo : type === 'archive' ? d.entry : d.task);
+    if (deletedWhileSending[item.id]) {
+      delete deletedWhileSending[item.id];
+      api(DELETE_ACTION[type], { id: item.id }).catch(function () { /* 次回の読み込みで表示される */ });
+      return;
     }
+    var list = listOf(type), i = findIdx(list, item.id);
+    if (i < 0) { if (real) list.unshift(real); }
+    else {
+      var local = list[i];
+      local.pending = false;
+      if (real) {
+        if (type === 'archive') local.lastFired = real.lastFired || '';
+        else { local.createdAt = real.createdAt; local.updatedAt = real.updatedAt; }
+      }
+      reconcileAfterAdd(type, local, real);
+    }
+    // 保管が当日等で自動タスク化された分を取り込む（既存・未送信は消さない）
+    if (type === 'archive') mergeNewTasks(d && d.tasks);
+  }
+  // 追加が届いた時点の内容と画面上の内容が違えば（送信中の編集・完了）、その差分を続けて送る
+  function reconcileAfterAdd(type, local, real) {
+    var str = function (v) { return v == null ? '' : String(v); };
+    if (real) {
+      var payload = { id: local.id }, changed = false;
+      SYNC_FIELDS[type].forEach(function (k) {
+        if (str(local[k]) !== str(real[k])) { payload[k] = local[k]; changed = true; }
+      });
+      if (changed) {
+        api(UPDATE_ACTION[type], payload).catch(function () { toast('一部の変更を保存できませんでした。再読み込みしてください'); });
+      }
+    }
+    if (type === 'task' && local.status === 'done' && !completeTimers[local.id] && (!real || real.status !== 'done')) {
+      api('complete', { id: local.id }).then(function (d) { mergeTask(d.task); })
+        .catch(function () { toast('完了を保存できませんでした。再読み込みしてください'); });
+    }
+  }
+  function mergeNewTasks(tasks) {
+    if (!tasks || !tasks.length) return;
+    var have = {}; state.tasks.forEach(function (t) { have[t.id] = true; });
+    tasks.forEach(function (t) { if (!have[t.id]) state.tasks.push(t); });
   }
 
   var completeTimers = {}; // id -> timer（確定待ちの完了）
 
   function toggleComplete(t) {
-    if (t.pending) { toast('通信待ちです。送信後に完了できます'); return; }
     if (t.status !== 'done') { completeTask(t); return; }
 
     // 完了 → 未完了に戻す
@@ -1346,6 +1394,7 @@
       return;
     }
     t.status = 'open'; t.doneAt = ''; render();
+    if (t.pending) { patchOutbox(t.id, { status: 'open', doneAt: '' }); return; }
     loading(true);
     api('uncomplete', { id: t.id }).then(function (d) {
       mergeTask(d.task);
@@ -1372,6 +1421,8 @@
     completeTimers[t.id] = setTimeout(function () {
       delete completeTimers[t.id];
       hideUndoBar(t.id);
+      // 未送信なら追加の送信完了後にまとめて送る（reconcileAfterAdd）
+      if (t.pending) { patchOutbox(t.id, { status: 'done', doneAt: t.doneAt }); return; }
       loading(true);
       api('complete', { id: t.id }).then(function (d) {
         mergeTask(d.task);
@@ -1389,9 +1440,9 @@
   }
 
   function saveField(t, fields, onError) {
-    if (t.pending) { toast('通信待ちです。送信後に変更できます'); if (onError) onError(); return; }
     Object.keys(fields).forEach(function (k) { t[k] = fields[k]; });
     render();
+    if (t.pending) { patchOutbox(t.id, fields); return; } // 追加と一緒に送る
     var payload = { id: t.id };
     Object.keys(fields).forEach(function (k) { payload[k] = fields[k]; });
     loading(true);
@@ -1406,8 +1457,7 @@
   function removeTask(t) {
     // 未送信タスクはサーバーへ送らず、端末のキューごと削除
     if (t.pending) {
-      state.tasks = state.tasks.filter(function (x) { return x.id !== t.id; });
-      saveOutbox(loadOutbox().filter(function (x) { return x.id !== t.id; }));
+      state.tasks = removePending(state.tasks, t.id);
       render();
       return;
     }

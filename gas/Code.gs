@@ -223,7 +223,7 @@ function addArchive_(params) {
     var id = params.id || generateId_();
     // 冪等: 同じIDが既にあれば二重追加しない（オフライン再送対策）
     var existing = findById_(sheet, ARCHIVE_COLUMNS, id);
-    if (existing) return { entry: existing.obj, tasks: [] };
+    if (existing) return { entry: existing.obj, newTasks: [] };
     var repeat = (params.repeat === 'monthly' || params.repeat === 'yearly') ? params.repeat : 'none';
     var entry = {
       id: id,
@@ -236,8 +236,9 @@ function addArchive_(params) {
     };
     if (!entry.text) throw new Error('text is required');
     sheet.appendRow(ARCHIVE_COLUMNS.map(function (c) { return entry[c]; }));
-    // 記載日が本日(月日)なら即タスク化。新しくできたタスクだけ返す（一覧全体は返さない＝速い）
-    return { entry: entry, tasks: runArchiveReminders_() };
+    // 記載日が本日(月日)なら即タスク化。新しくできたタスクだけ返す（一覧全体は返さない＝速い）。
+    // ※ 旧版アプリは `tasks` を受け取ると一覧を丸ごと置き換えるため、別名 newTasks で返す
+    return { entry: entry, newTasks: runArchiveReminders_() };
   } finally {
     lock.releaseLock();
   }
@@ -261,7 +262,7 @@ function updateArchive_(params) {
     if (params.createdAt !== undefined || params.repeat !== undefined) entry.lastFired = '';
     sheet.getRange(hit.rowIndex, 1, 1, ARCHIVE_COLUMNS.length)
          .setValues([ARCHIVE_COLUMNS.map(function (col) { return entry[col]; })]);
-    return { entry: entry, tasks: runArchiveReminders_() };
+    return { entry: entry, newTasks: runArchiveReminders_() };
   } finally {
     lock.releaseLock();
   }

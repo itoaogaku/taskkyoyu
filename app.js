@@ -963,7 +963,7 @@
     loading(true);
     api('updateArchive', payload).then(function (d) {
       // 画面上の記録はそのまま。日付変更等で自動タスク化された分だけ取り込む
-      mergeNewTasks(d && d.tasks);
+      mergeNewTasks(d && (d.newTasks || d.tasks));
       render();
     }).catch(function (err) {
       Object.keys(prev).forEach(function (k) { e[k] = prev[k]; });
@@ -1354,7 +1354,7 @@
       reconcileAfterAdd(type, local, real);
     }
     // 保管が当日等で自動タスク化された分を取り込む（既存・未送信は消さない）
-    if (type === 'archive') mergeNewTasks(d && d.tasks);
+    if (type === 'archive') mergeNewTasks(d && (d.newTasks || d.tasks));
   }
   // 追加が届いた時点の内容と画面上の内容が違えば（送信中の編集・完了）、その差分を続けて送る
   function reconcileAfterAdd(type, local, real) {
